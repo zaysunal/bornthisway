@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rebirth Exit Prompt</title>
+  <style>
+    /* =============================================================
+       THEME TOKENS (tweak once, update everywhere)
+       -------------------------------------------------------------
+       - Colors + sizes are centralized here.
+       - --heart-h controls the heart button's height responsively.
+    ============================================================= */
+    :root {
+      --bg: #0b0b0f;            /* page background */
+      --fg: #e9e9ef;            /* primary text */
+      --muted: #a6a6b3;         /* secondary text */
+      --accent: #ff5da2;        /* UI accent (spinner, outlines) */
+      --accent-2: #66f0b8;      /* gradient accent for prompt text */
+      --card: #15151b;          /* card surface */
+      --btn: #1f1f29;           /* small button bg */
+
+      /* Upside-down heart palette */
+      --heart-outer: #ff6aa7;
+      --heart-inner: #ff2c89;
+      --heart-core:  #ffd1e4;
+
+      /* Responsive heart height (used for button size + positioning math) */
+      --heart-h: clamp(220px, 24vw, 320px);
+      --heart-scale: .6667; /* scale the heart to 2/3 visual size while keeping center */
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+
+    /* Full-page grid centers the app card */
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 700px at 70% -10%, #1b1b22 0%, var(--bg) 50%);
+      color: var(--fg);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      display: grid;
+      place-items: center;
+    }
+
+    .wrap { width: min(1200px, 94vw); }
+
+    /* Main app card */
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 18px;
+      padding: clamp(16px, 3vw, 28px);
+      box-shadow: 0 20px 50px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.06);
+      display: grid;
+      gap: 14px;
+      place-items: center;
+      text-align: center;
+    }
+
+    /* =============================================================
+       VISUALIZER CANVAS (abstract animation linked to task)
+       -------------------------------------------------------------
+       - The canvas is drawn over time with glowing curves.
+       - Height is responsive so it fills the card nicely.
+    ============================================================= */
+    .viz {
+      width: min(900px, 86vw);
+      height: clamp(240px, 38vh, 420px);
+      border-radius: 16px;
+      overflow: hidden; /* masks drawing edges */
+      background: #0c0c12;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    canvas { width: 100%; height: 100%; display: block; }
+
+    /* =============================================================
+       PROMPT (the big task text)
+       -------------------------------------------------------------
+       - We swap fonts per task for a playful vibe.
+       - Min height prevents layout jump during updates.
+    ============================================================= */
+    .prompt {
+      font-size: clamp(28px, 6vw, 60px);
+      line-height: 1.06;
+      font-weight: 900;
+      text-wrap: balance;
+      margin: 0;
+      background: linear-gradient(90deg, var(--fg), var(--accent-2));
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+      min-height: 3lh;
+    }
+
+    /* =============================================================
+       UPSIDE-DOWN HEART BUTTON
+       -------------------------------------------------------------
+       - Uses an SVG heart (smooth curves) rotated via CSS.
+       - The label is centered on top and remains upright.
+       - Position is nudged DOWN by 1/6 of its own height per request.
+    ============================================================= */
+    .roll-wrap { display: grid; place-items: center; gap: 8px; }
+
+    /* Push the heart DOWN ~1/6 of its height (positive margin) */
+    .heart-wrap { margin-top: calc(-2 * var(--heart-h) / 5); }
+
+    /* Wrapper that visually scales the heart without affecting layout center */
+    .heart-scale { display: grid; place-items: center; transform: scale(var(--heart-scale)); transform-origin: center; }
+
+    .heart-btn {
+      position: relative;
+      inline-size: clamp(260px, 44vw, 560px);
+      block-size: var(--heart-h);
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      filter: drop-shadow(0 12px 28px rgba(255,93,162,0.35));
+      animation: pulse 2.4s ease-in-out infinite; /* gentle pulsing */
+      padding: 0; /* remove default button padding */
+    }
+    .heart-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 6px; }
+
+    /* The heart SVG is drawn upright but rotated 180° to read as upside-down */
+    .heart-svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(180deg); }
+
+    /* Counter-rotated label so text remains upright and centered */
+    .heart-label {
+      position: relative; z-index: 1; display: grid; place-items: center;
+      width: 100%; height: 100%;
+      transform: rotate(0deg); /* label stays upright */
+      color: #fff; font-size: clamp(20px, 2.6vw, 32px); font-weight: 800;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.35);
+      letter-spacing: 0.5px; padding: 0 18px;
+    }
+
+    @keyframes pulse { 0%,100%{ transform: scale(1); } 50%{ transform: scale(1.03); } }
+
+    /* Small utility button (Add Task) */
+    .controls { display: grid; grid-auto-flow: row; gap: 8px; align-items: center; justify-items: center; }
+    .btn.sm { appearance: none; border: 1px solid rgba(255,255,255,0.12); background: var(--btn); color: var(--fg); cursor: pointer; padding: 8px 12px; border-radius: 10px; font-weight: 700; }
+
+    .muted { color: var(--muted); }
+
+    /* Confetti-ish emoji burst for feedback */
+    .burst { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+    .burst > span { position: absolute; font-size: clamp(16px, 3vw, 26px); animation: float 1200ms ease-in forwards; }
+    @keyframes float { to { transform: translateY(50vh) rotate(240deg); opacity: 0; } }
+
+    /* =============================================================
+       SCANNING OVERLAY (fake camera prompts)
+       -------------------------------------------------------------
+       - Full-screen veil with animated stripes + huge spinner.
+       - We only show this during the pre-reveal scan sequence.
+    ============================================================= */
+    .veil {
+      position: fixed; inset: 0; display: none; place-items: center;
+      background: rgba(0,0,0,0.55); backdrop-filter: blur(2px);
+      z-index: 50; overflow: hidden;
+    }
+    .veil.show { display: grid; }
+
+    /* Slow sweeping scan stripes (gives a "scanner" vibe) */
+    .veil::before {
+      content:""; position:absolute; inset:-20%;
+      background: repeating-linear-gradient(to bottom, rgba(255,255,255,0.06) 0 2px, transparent 2px 8px);
+      animation: sweep 3.6s linear infinite; mix-blend-mode: screen;
+    }
+    @keyframes sweep { from { transform: translateY(-30%); } to { transform: translateY(30%); } }
+
+    /* Monumental spinner (≈ 2/3 viewport) */
+    .spinner {
+      width: min(66vh, 66vw);
+      height: min(66vh, 66vw);
+      border-radius: 999px;
+      border: clamp(8px, 1.2vw, 14px) solid rgba(255,255,255,0.15);
+      border-top-color: var(--accent);
+      animation: spin 1.1s linear infinite;
+      box-shadow: 0 0 60px rgba(255,93,162,0.25) inset;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Floating scan text near top center */
+    .scan-wrap { position: absolute; top: 6vh; left: 50%; transform: translateX(-50%); text-align: center; padding: 8px 14px; }
+    .scan-line { font-weight: 800; font-size: clamp(20px,2.8vw,32px); letter-spacing: 0.5px; text-shadow: 0 2px 6px rgba(0,0,0,0.5); }
+    .scan-sub  { margin-top: 6px; color: var(--muted); font-size: clamp(12px,1.4vw,16px); text-shadow: 0 2px 6px rgba(0,0,0,0.5); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <!-- Generative visualizer canvas -->
+      <div class="viz"><canvas id="vizCanvas"></canvas></div>
+
+      <!-- Big prompt text (updated per task) -->
+      <div class="prompt" id="prompt">Click to receive your task…</div>
+
+      <!-- Main action: upside-down heart button with SVG path -->
+      <div class="roll-wrap">
+        <div class="heart-wrap">
+          <div class="heart-scale">
+            <button class="heart-btn" id="rollBtn" aria-label="Reveal a task">
+              <!-- SVG heart (upright in markup; flipped via CSS to read upside-down) -->
+              <svg class="heart-svg" viewBox="0 0 200 180" aria-hidden="true" focusable="false">
+                <defs>
+                  <radialGradient id="gCore" cx="50%" cy="35%" r="70%">
+                    <stop offset="0%"  stop-color="var(--heart-core)"/>
+                    <stop offset="45%" stop-color="#ffa1c8"/>
+                    <stop offset="70%" stop-color="transparent"/>
+                  </radialGradient>
+                  <linearGradient id="gBody" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="var(--heart-outer)"/>
+                    <stop offset="60%" stop-color="var(--heart-inner)"/>
+                    <stop offset="100%" stop-color="#b01464"/>
+                  </linearGradient>
+                </defs>
+                <path d="M100 170 C 100 170, 10 120, 10 60 C 10 20, 40 10, 65 10 C 85 10, 100 25, 100 40 C 100 25, 115 10, 135 10 C 160 10, 190 20, 190 60 C 190 120, 100 170, 100 170 Z" fill="url(#gBody)"/>
+                <path d="M100 170 C 100 170, 10 120, 10 60 C 10 20, 40 10, 65 10 C 85 10, 100 25, 100 40 C 100 25, 115 10, 135 10 C 160 10, 190 20, 190 60 C 190 120, 100 170, 100 170 Z" fill="url(#gCore)" opacity="0.8"/>
+              </svg>
+              <span class="heart-label" id="rollLabel">Born This Way</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Secondary controls: only Add Task remains -->
+      <div class="controls">
+        <button class="btn sm" id="addBtn" title="Add a new task">➕ Add New Task</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- Emoji confetti layer & scanning veil (shown during pre-reveal) -->
+  <div class="burst" id="burst" aria-hidden="true"></div>
+  <div class="veil" id="veil" aria-hidden="true">
+    <div class="scan-wrap">
+      <div class="scan-line" id="scanLine">Initializing scanners…</div>
+      <div class="scan-sub" id="scanSub">Stand still for a moment.</div>
+    </div>
+    <div class="spinner" aria-hidden="true"></div>
+  </div>
+
+  <!-- Add-task dialog (local-only persistence via localStorage) -->
+  <dialog id="addDialog">
+    <form method="dialog" class="grid">
+      <h3 style="margin:6px 0 0">Add a New Task</h3>
+      <label>Type a single task (keep it playful). It will be added for future visitors.</label>
+      <input id="newTaskInput" type="text" placeholder="e.g., Exit like a confetti volcano…" />
+      <div class="row" style="justify-content:end">
+        <button class="btn sm" value="cancel">Cancel</button>
+        <button class="btn primary" id="addSaveBtn" value="default">Add</button>
+      </div>
+      <p class="muted" style="margin: 0">Saved locally on this device.</p>
+    </form>
+  </dialog>
+
+  <script>
+    /* =============================================================
+       DEFAULT TASKS + SCAN LINES + FONT VIBES
+       -------------------------------------------------------------
+       - You can extend DEFAULT_TASKS in the UI via Add New Task.
+       - SCAN_PROMPTS are shown randomly to fake a camera scan.
+       - FONT_VIBES rotate per task to change the prompt's personality.
+    ============================================================= */
+    const DEFAULT_TASKS = [
+      "Exit like a newborn giraffe learning to walk.",
+      "Take your first breath like you're sipping boba tea.",
+      "Crawl out dramatically… then strike a Vogue pose.",
+      "Pretend you're a confused alien seeing Earth for the first time.",
+      "Stomp out like a dinosaur hatchling.",
+      "Flap your ‘newborn wings’ like you're about to fly.",
+      "Roar like a tiny but very dramatic lion cub.",
+      "Waddle like a penguin on its first ice walk.",
+      "Sneeze your way into existence.",
+      "Blow kisses to your new planet.",
+      "Strut out as Beyoncé (no excuses).",
+      "Exit like you've just invented walking and you're proud of it.",
+      "Whisper ‘I'm aliveeee’ in slow motion.",
+      "Pretend gravity is a surprise and negotiate with it.",
+      "Do the worm… or your best attempt at it.",
+      "Exit like you're carrying an invisible oversized balloon.",
+      "Crawl, then suddenly sprint like you remembered rent is due.",
+      "Cry dramatically like you're auditioning for a soap opera.",
+      "Pretend you're a freshly opened can of soda.",
+      "Exit like you're the messiah of disco."
+    ];
+
+    const SCAN_PROMPTS = [
+      "Align face with imaginary lens…",
+      "Look into the camera and blink twice.",
+      "Hold still. Calibrating aura field…",
+      "Please exhale slowly — measuring life-force…",
+      "Turn your head left, then right… ok perfect.",
+      "Analyzing newborn frequencies…",
+      "Tilt chin 5° up. Gorgeous.",
+      "Scanning posture. Flex one toe. Nice.",
+      "Smile like you invented it.",
+      "Eye contact confirmed. Releasing destiny…"
+    ];
+
+    const FONT_VIBES = [
+      "Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif",
+      "'Courier New', Courier, monospace",
+      "Georgia, 'Times New Roman', serif",
+      "'Trebuchet MS', 'Segoe UI', Tahoma, sans-serif",
+      "'Comic Sans MS', 'Comic Sans', cursive, sans-serif",
+      "'Lucida Grande', 'Lucida Sans Unicode', 'Segoe UI', sans-serif",
+      "'Gill Sans', 'Gill Sans MT', Calibri, 'Segoe UI', sans-serif"
+    ];
+
+    /* =============================================================
+       STATE + PERSISTENCE
+       -------------------------------------------------------------
+       - tasks: master list (defaults + user additions)
+       - remaining: prevents immediate repeats until pool is recycled
+       - localStorage keeps tasks on this machine only
+    ============================================================= */
+    const LS_KEY = 'rebirth_tasks_v1';
+    let tasks = loadTasks();
+    let remaining = [...tasks];
+    let resetTimer = null; // auto-return to landing after reveal
+
+    function loadTasks(){
+      try {
+        const raw = localStorage.getItem(LS_KEY);
+        const list = raw ? JSON.parse(raw) : DEFAULT_TASKS;
+        return list.filter(Boolean);
+      } catch { return DEFAULT_TASKS; }
+    }
+    function saveTasks(list){ localStorage.setItem(LS_KEY, JSON.stringify(list)); }
+
+    /* =============================================================
+       ELEMENT HOOKS
+    ============================================================= */
+    const promptEl   = document.getElementById('prompt');
+    const rollBtn    = document.getElementById('rollBtn');
+    const rollLabel  = document.getElementById('rollLabel');
+    const burst      = document.getElementById('burst');
+    const veil       = document.getElementById('veil');
+    const scanLine   = document.getElementById('scanLine');
+    const scanSub    = document.getElementById('scanSub');
+
+    const addDialog   = document.getElementById('addDialog');
+    const newTaskInput= document.getElementById('newTaskInput');
+    const addSaveBtn  = document.getElementById('addSaveBtn');
+
+    // Landing message
+    promptEl.textContent = 'Click to receive your task…';
+
+    /* =============================================================
+       RNG HELPERS (deterministic when seeded by text)
+       -------------------------------------------------------------
+       - xmur3: hash string → 32-bit integer seed
+       - mulberry32: quick PRNG using that seed
+       We seed the visualizer with task text so each task gets a
+       repeatable motion profile (while still feeling alive).
+    ============================================================= */
+    function xmur3(str){
+      let h=1779033703^str.length;
+      for(let i=0;i<str.length;i++){ h=Math.imul(h^str.charCodeAt(i),3432918353); h=h<<13|h>>>19; }
+      return function(){
+        h=Math.imul(h^(h>>>16),2246822507);
+        h=Math.imul(h^(h>>>13),3266489909);
+        return (h^h>>>16)>>>0;
+      }
+    }
+    function mulberry32(a){
+      return function(){
+        let t=a+=0x6D2B79F5;
+        t=Math.imul(t^t>>>15,t|1);
+        t^=t+Math.imul(t^t>>>7,t|61);
+        return ((t^t>>>14)>>>0)/4294967296;
+      }
+    }
+
+    /* =============================================================
+       GENERATIVE VISUALIZER
+       -------------------------------------------------------------
+       - Draws colored ellipses along parametric spirals.
+       - Keyword → mode mapping tweaks wobble/shape per task.
+    ============================================================= */
+    const canvas = document.getElementById('vizCanvas');
+    const ctx = canvas.getContext('2d');
+    function resize(){ canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
+    window.addEventListener('resize', resize); resize();
+
+    let rafId=null, seedRand=mulberry32(1), t=0, mode='spiral';
+    function setVizSeed(seedStr){ const seed=xmur3(seedStr)(); seedRand=mulberry32(seed); mode=pickModeFromTask(seedStr); }
+    function rand(){ return seedRand(); }
+
+    // Map some task words → distinct motion profiles
+    function pickModeFromTask(text){
+      const s=text.toLowerCase();
+      if(s.includes('giraffe')) return 'tall-curves';
+      if(s.includes('penguin')) return 'waddle';
+      if(s.includes('alien')) return 'orbit';
+      if(s.includes('dinosaur')) return 'stomp-spiral';
+      if(s.includes('balloon')) return 'float';
+      if(s.includes('disco')||s.includes('beyoncé')||s.includes('vogue')) return 'disco-swirl';
+      if(s.includes('soda')||s.includes('sneeze')) return 'burst';
+      return 'spiral';
+    }
+
+    function draw(){
+      const {width:w,height:h}=canvas;
+
+      // Fade old frame for smooth trails (persistence)
+      ctx.globalCompositeOperation='source-over';
+      ctx.fillStyle='rgba(12,12,18,0.22)';
+      ctx.fillRect(0,0,w,h);
+
+      // Additive blending makes overlaps glow
+      ctx.globalCompositeOperation='lighter';
+
+      const cx=w/2, cy=h/2;     // center of canvas
+      const turns=220;          // density of points
+
+      for(let i=0;i<turns;i++){
+        const p=i/turns;        // progress 0..1
+        const ang=p*(mode==='orbit'?Math.PI*6:Math.PI*10)+t*0.02;
+        const base=(mode==='tall-curves'?Math.min(w,h)*0.12:Math.min(w,h)*0.18);
+        const r=base+p*(mode==='spiral'?Math.min(w,h)*0.42:Math.min(w,h)*0.36);
+
+        // Mode-specific wobble (changes curve flavor)
+        const wobble=(
+          mode==='waddle'       ? Math.sin(p*40 + t*0.12)*18 :
+          mode==='stomp-spiral' ? Math.sin(p*22 + t*0.08)*28 :
+          mode==='disco-swirl'  ? Math.sin(p*60 + t*0.20)*14 :
+          mode==='burst'        ? Math.sin(p*95 + t*0.35)*10 :
+          mode==='float'        ? Math.sin(p*20 + t*0.05)*12 :
+          mode==='tall-curves'  ? Math.sin(p*28 + t*0.10)*22 : 0
+        );
+
+        const rr=r+wobble;
+        const x=cx+Math.cos(ang)*(rr*(mode==='tall-curves'?0.75:1));
+        const y=cy+Math.sin(ang)*(rr*(mode==='tall-curves'?1.15:1));
+
+        // Cycle hue for neon effect
+        const hue=(t*0.6 + p*360) % 360;
+        ctx.fillStyle=`hsla(${hue},95%,62%,0.24)`;
+        ctx.beginPath();
+        const size=(mode==='burst'?2.2:1.6) + p*1.2;
+        ctx.ellipse(x,y,size,size*(mode==='tall-curves'?1.4:1),0,0,Math.PI*2);
+        ctx.fill();
+      }
+
+      // Gentle inner glow
+      const radial=ctx.createRadialGradient(cx,cy,10,cx,cy,Math.min(w,h)*0.7);
+      radial.addColorStop(0,'rgba(255,255,255,0.03)');
+      radial.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle=radial;
+      ctx.fillRect(0,0,w,h);
+
+      t+=1;
+      rafId=requestAnimationFrame(draw);
+    }
+
+    function startViz(){ cancelAnimationFrame(rafId); rafId=requestAnimationFrame(draw); }
+    function stopViz(){ cancelAnimationFrame(rafId); const {width:w,height:h}=canvas; ctx.clearRect(0,0,w,h); }
+
+    /* =============================================================
+       TASK PICK + PRESENTATION
+       -------------------------------------------------------------
+       - pick(): no repeats until pool empties, then recycle
+       - showPrompt(): updates font, text, seeds animation, confetti
+    ============================================================= */
+    function pick(){
+      if(!remaining.length){ remaining=[...tasks]; }
+      const i=Math.floor(Math.random()*remaining.length);
+      return remaining.splice(i,1)[0];
+    }
+
+    function applyFontVibe(text){
+      const idx=xmur3(text)()%FONT_VIBES.length;
+      promptEl.style.fontFamily=FONT_VIBES[idx];
+      promptEl.style.letterSpacing=(idx%2===0?'0.5px':'1.5px');
+      promptEl.style.textTransform=(idx%3===0?'uppercase':'none');
+    }
+
+    function showPrompt(text){
+      applyFontVibe(text);
+      promptEl.textContent=text;
+      setVizSeed(text);   // seed visualizer so shape matches task vibe
+      startViz();         // (re)start the animation loop
+      burstEmojis('✨💫🌸🫧🎉🌟');
+      scheduleReset();    // auto-reset to landing after some time
+    }
+
+    // Tiny celebratory emoji burst
+    function burstEmojis(sample){
+      const emojis=sample.split('');
+      for(let k=0;k<16;k++){
+        const s=document.createElement('span');
+        s.textContent=emojis[Math.floor(Math.random()*emojis.length)];
+        s.style.left=Math.random()*100+'vw';
+        s.style.top='-5vh';
+        s.style.transform=`translateY(0) rotate(${Math.random()*60-30}deg)`;
+        burst.appendChild(s);
+        setTimeout(()=> s.remove(), 1300);
+      }
+    }
+
+    /* =============================================================
+       LANDING RESET (after reveal)
+       -------------------------------------------------------------
+       - Keeps flow moving by returning to the neutral landing state.
+    ============================================================= */
+    function scheduleReset(){
+      clearTimeout(resetTimer);
+      resetTimer=setTimeout(resetToLanding, 10000); // 10s feels right in-gallery
+    }
+    function resetToLanding(){ promptEl.textContent='Click to receive your task…'; stopViz(); }
+
+    /* =============================================================
+       FAKE CAMERA SCAN FLOW (pre-reveal)
+       -------------------------------------------------------------
+       - Shows 2–3 randomized scan prompts.
+       - Each prompt now lingers ~2.55–3.0s (per your request to add ~2s).
+       - The final "Analyzing" phase lasts for **1/2 of the total scan time**.
+         If total scan steps took S ms, analyzing lasts A = S ms
+         (because A = 1/2 * (S + A) ⇒ A = S).
+    ============================================================= */
+    async function runScanSequence(){
+      veil.classList.add('show');
+
+      // 2–3 steps, each ~2.55–3.0s; accumulate to compute analyzing time
+      const steps = 2 + Math.floor(Math.random()*2);
+      let stepsSum = 0;
+      for(let i=0;i<steps;i++){
+        scanLine.textContent = SCAN_PROMPTS[Math.floor(Math.random()*SCAN_PROMPTS.length)];
+        scanSub.textContent  = 'Scanning' + '.'.repeat((i%3)+1);
+        const stepDur = 2550 + Math.random()*450; // ≈2.55s–3.0s
+        stepsSum += stepDur;
+        await new Promise(r=> setTimeout(r, stepDur));
+      }
+
+      // Analyzing takes **1/2 of total** ⇒ equal to sum of scan-step time
+      scanLine.textContent = 'Analyzing results…';
+      scanSub.textContent  = 'Almost there';
+      const analyzeDur = Math.max(800, Math.round(stepsSum));
+      await new Promise(r=> setTimeout(r, analyzeDur));
+
+      veil.classList.remove('show');
+    }
+
+    /* =============================================================
+       EVENTS
+       -------------------------------------------------------------
+       - Heart click triggers scan → picks task → reveals + animates
+       - Add Task dialog writes into localStorage and extends pools
+       - Typing safety: Space won’t bubble; Enter submits
+    ============================================================= */
+    rollBtn.addEventListener('click', async ()=>{
+      try { rollBtn.disabled = true; } catch {}
+      await runScanSequence();
+      showPrompt(pick());
+      try { rollBtn.disabled = false; } catch {}
+    });
+
+    function openAdd(){ newTaskInput.value=''; addDialog.showModal(); setTimeout(()=> newTaskInput.focus(), 10); }
+    document.getElementById('addBtn').addEventListener('click', openAdd);
+
+    newTaskInput.addEventListener('keydown', (e)=>{
+      if(e.key===' '){ e.stopPropagation(); }         // prevent space from triggering anything global
+      if(e.key==='Enter'){ e.preventDefault(); addSaveBtn.click(); }
+    });
+
+    addSaveBtn.addEventListener('click', (e)=>{
+      e.preventDefault();
+      const txt=(newTaskInput.value||'').trim();
+      if(!txt) return;
+      tasks.push(txt);            // extend master list
+      saveTasks(tasks);           // persist locally
+      remaining.push(txt);        // make it eligible immediately
+      addDialog.close();
+    });
+  </script>
+</body>
+</html>
